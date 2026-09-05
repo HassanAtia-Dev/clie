@@ -29,83 +29,90 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Fetch missing client files from upstream MuMain
+      - name: Sync truncated/missing sources from upstream MuMain
         shell: pwsh
         run: |
-          $needDeps = -not (Test-Path "client/src/dependencies/include/gl/glew.h")
-          $needPackets = -not (Test-Path "client/src/source/Dotnet/PacketFunctions_ChatServer.h")
-
-          # Truncated / outdated local files that must match upstream API
-          $filesToRestore = @(
-            @{ Local = "client/src/source/Character/CharMakeWin.cpp"; Upstream = "src/source/Character/CharMakeWin.cpp"; MinLines = 450 },
-            @{ Local = "client/src/source/UI/Legacy/UIControls.h"; Upstream = "src/source/UI/Legacy/UIControls.h"; MinLines = 1500 },
-            @{ Local = "client/src/source/Render/Textures/ZzzOpenglUtil.h"; Upstream = "src/source/Render/Textures/ZzzOpenglUtil.h"; MinLines = 140 },
-            # Local uses GetFontDC(); upstream uses MeasureText() — always prefer upstream
-            @{ Local = "client/src/source/Core/Utilities/UsefulDef.cpp"; Upstream = "src/source/Core/Utilities/UsefulDef.cpp"; MinLines = 99999 }
-          )
-
-          $needRestore = $false
-          foreach ($f in $filesToRestore) {
-            if (-not (Test-Path $f.Local)) { $needRestore = $true; break }
-            $lines = (Get-Content $f.Local | Measure-Object -Line).Lines
-            if ($lines -lt $f.MinLines) { $needRestore = $true; break }
-          }
-
-          if (-not $needDeps -and -not $needPackets -and -not $needRestore) {
-            Write-Host "All upstream files already present"
-            exit 0
-          }
-
           Write-Host "Downloading upstream MuMain archive..."
           $zip = Join-Path $env:RUNNER_TEMP "mumain.zip"
           $out = Join-Path $env:RUNNER_TEMP "mumain-extract"
           Invoke-WebRequest -Uri "https://github.com/sven-n/MuMain/archive/refs/heads/main.zip" -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath $out -Force
-          $src = (Get-ChildItem $out -Directory | Select-Object -First 1).FullName
+          $srcRoot = (Get-ChildItem $out -Directory | Select-Object -First 1).FullName
+          $upSource = Join-Path $srcRoot "src/source"
+          $localSource = "client/src/source"
 
-          if ($needDeps) {
-            $depsSrc = Join-Path $src "src/dependencies"
-            if (-not (Test-Path (Join-Path $depsSrc "include/gl/glew.h"))) {
-              Write-Error "src/dependencies missing in upstream archive"
-              exit 1
-            }
-            New-Item -ItemType Directory -Force -Path "client/src" | Out-Null
-            Copy-Item -Recurse -Force $depsSrc "client/src/dependencies"
-            Write-Host "Installed client/src/dependencies"
+          if (-not (Test-Path $upSource)) {
+            Write-Error "Upstream src/source not found"
+            exit 1
           }
 
-          if ($needPackets) {
-            $dotnetSrc = Join-Path $src "src/source/Dotnet"
-            $dotnetDst = "client/src/source/Dotnet"
+          # 1) dependencies (GLEW etc.)
+          $depsSrc = Join-Path $srcRoot "src/dependencies"
+          if (Test-Path (Join-Path $depsSrc "include/gl/glew.h")) {
+            New-Item -ItemType Directory -Force -Path "client/src" | Out-Null
+            if (-not (Test-Path "client/src/dependencies/include/gl/glew.h")) {
+              Copy-Item -Recurse -Force $depsSrc "client/src/dependencies"
+              Write-Host "Installed client/src/dependencies"
+            } else {
+              Write-Host "dependencies already present"
+            }
+          } else {
+            Write-Error "upstream dependencies missing glew.h"
+            exit 1
+          }
+
+          # 2) Walk all upstream source files and restore if local is missing or truncated
+          #    Threshold: local lines < 90% of upstream lines → treat as truncated
+          $restored = 0
+          $skipped = 0
+          $exts = @(".cpp", ".h", ".hpp", ".c", ".cc", ".cxx")
+
+          Get-ChildItem -Path $upSource -Recurse -File | ForEach-Object {
+            $rel = $_.FullName.Substring($upSource.Length).TrimStart('\', '/')
+            $dest = Join-Path $localSource $rel
+            $ext = $_.Extension.ToLowerInvariant()
+            if ($exts -notcontains $ext) { return }
+
+            $upLines = (Get-Content $_.FullName | Measure-Object -Line).Lines
+            if ($upLines -lt 5) { return }  # ignore tiny stubs
+
+            $need = $false
+            if (-not (Test-Path $dest)) {
+              $need = $true
+            } else {
+              $localLines = (Get-Content $dest | Measure-Object -Line).Lines
+              # truncated if significantly shorter than upstream
+              if ($localLines -lt [math]::Floor($upLines * 0.9)) {
+                $need = $true
+              }
+            }
+
+            if ($need) {
+              $dir = Split-Path $dest -Parent
+              New-Item -ItemType Directory -Force -Path $dir | Out-Null
+              Copy-Item -Force $_.FullName $dest
+              $restored++
+              if ($restored -le 40) {
+                Write-Host "  restore: $rel ($upLines lines)"
+              }
+            } else {
+              $skipped++
+            }
+          }
+
+          Write-Host "Restored $restored file(s) from upstream; kept $skipped local file(s)"
+
+          # 3) Ensure Dotnet packet headers exist (copy any still missing)
+          $dotnetSrc = Join-Path $upSource "Dotnet"
+          $dotnetDst = Join-Path $localSource "Dotnet"
+          if (Test-Path $dotnetSrc) {
             New-Item -ItemType Directory -Force -Path $dotnetDst | Out-Null
             Get-ChildItem $dotnetSrc -File | ForEach-Object {
               $dest = Join-Path $dotnetDst $_.Name
               if (-not (Test-Path $dest)) {
                 Copy-Item $_.FullName $dest
-                Write-Host "  + $($_.Name)"
+                Write-Host "  + Dotnet/$($_.Name)"
               }
-            }
-            Write-Host "Installed missing Dotnet packet files"
-          }
-
-          foreach ($f in $filesToRestore) {
-            $should = $false
-            if (-not (Test-Path $f.Local)) { $should = $true }
-            else {
-              $lines = (Get-Content $f.Local | Measure-Object -Line).Lines
-              if ($lines -lt $f.MinLines) { $should = $true }
-            }
-            if ($should) {
-              $up = Join-Path $src $f.Upstream
-              if (-not (Test-Path $up)) {
-                Write-Error "Upstream file missing: $($f.Upstream)"
-                exit 1
-              }
-              $dir = Split-Path $f.Local -Parent
-              New-Item -ItemType Directory -Force -Path $dir | Out-Null
-              Copy-Item -Force $up $f.Local
-              $newLines = (Get-Content $f.Local | Measure-Object -Line).Lines
-              Write-Host "Restored $($f.Local) from upstream ($newLines lines)"
             }
           }
 
