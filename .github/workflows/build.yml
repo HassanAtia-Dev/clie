@@ -35,10 +35,13 @@ jobs:
           $needDeps = -not (Test-Path "client/src/dependencies/include/gl/glew.h")
           $needPackets = -not (Test-Path "client/src/source/Dotnet/PacketFunctions_ChatServer.h")
 
+          # Truncated / outdated local files that must match upstream API
           $filesToRestore = @(
             @{ Local = "client/src/source/Character/CharMakeWin.cpp"; Upstream = "src/source/Character/CharMakeWin.cpp"; MinLines = 450 },
             @{ Local = "client/src/source/UI/Legacy/UIControls.h"; Upstream = "src/source/UI/Legacy/UIControls.h"; MinLines = 1500 },
-            @{ Local = "client/src/source/Render/Textures/ZzzOpenglUtil.h"; Upstream = "src/source/Render/Textures/ZzzOpenglUtil.h"; MinLines = 140 }
+            @{ Local = "client/src/source/Render/Textures/ZzzOpenglUtil.h"; Upstream = "src/source/Render/Textures/ZzzOpenglUtil.h"; MinLines = 140 },
+            # Local uses GetFontDC(); upstream uses MeasureText() — always prefer upstream
+            @{ Local = "client/src/source/Core/Utilities/UsefulDef.cpp"; Upstream = "src/source/Core/Utilities/UsefulDef.cpp"; MinLines = 99999 }
           )
 
           $needRestore = $false
