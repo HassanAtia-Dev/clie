@@ -48,9 +48,10 @@ jobs:
           $localSource = "client/src/source"
 
           if (-not (Test-Path $upSource)) {
-            Write-Error "Upstream src/source not found"
+            Write-Error "Upstream src/source not found at $upSource"
             exit 1
           }
+          Write-Host "Upstream source: $upSource"
 
           # 1) dependencies (GLEW etc.)
           $depsSrc = Join-Path $srcRoot "src/dependencies"
@@ -67,34 +68,37 @@ jobs:
             exit 1
           }
 
-          # 2) Walk all upstream source files and restore if local is missing or truncated
+          # 2) Restore missing/truncated sources (relative path via regex, no TrimStart overload issues)
           $restored = 0
           $skipped = 0
           $exts = @(".cpp", ".h", ".hpp", ".c", ".cc", ".cxx")
+          $upPrefix = [regex]::Escape(($upSource -replace '[\\/]+$','')) + '[\\/]'
 
           Get-ChildItem -Path $upSource -Recurse -File | ForEach-Object {
-            $rel = $_.FullName.Substring($upSource.Length).TrimStart('\\', '/')
-            $dest = Join-Path $localSource $rel
             $ext = $_.Extension.ToLowerInvariant()
             if ($exts -notcontains $ext) { return }
 
-            $upLines = (Get-Content $_.FullName | Measure-Object -Line).Lines
+            $rel = $_.FullName -replace "^$upPrefix", ""
+            $rel = $rel -replace '/', '\'
+            $dest = Join-Path $localSource $rel
+
+            $upLines = (Get-Content -LiteralPath $_.FullName | Measure-Object -Line).Lines
             if ($upLines -lt 5) { return }
 
             $need = $false
-            if (-not (Test-Path $dest)) {
+            if (-not (Test-Path -LiteralPath $dest)) {
               $need = $true
             } else {
-              $localLines = (Get-Content $dest | Measure-Object -Line).Lines
+              $localLines = (Get-Content -LiteralPath $dest | Measure-Object -Line).Lines
               if ($localLines -lt [math]::Floor($upLines * 0.9)) {
                 $need = $true
               }
             }
 
             if ($need) {
-              $dir = Split-Path $dest -Parent
+              $dir = Split-Path -Parent $dest
               New-Item -ItemType Directory -Force -Path $dir | Out-Null
-              Copy-Item -Force $_.FullName $dest
+              Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
               $restored++
               if ($restored -le 40) {
                 Write-Host "  restore: $rel ($upLines lines)"
@@ -137,17 +141,20 @@ jobs:
         shell: pwsh
         run: |
           $installer = Join-Path $env:RUNNER_TEMP "openssl-setup.exe"
-          Write-Host "Downloading OpenSSL for ${{ matrix.arch }}..."
+          Write-Host "Downloading OpenSSL for ${{ matrix.arch }} from ${{ matrix.openssl_url }}..."
           Invoke-WebRequest -Uri "${{ matrix.openssl_url }}" -OutFile $installer
           Write-Host "Silent install to ${{ matrix.openssl_dir }}..."
           $args = "/verysilent /suppressmsgboxes /sp- /DIR=`"${{ matrix.openssl_dir }}`""
           $p = Start-Process -FilePath $installer -ArgumentList $args -Wait -PassThru
           Write-Host "Installer exit code: $($p.ExitCode)"
-          if (-not (Test-Path "${{ matrix.openssl_dir }}\include\openssl\ssl.h")) {
-            Write-Host "Listing Program Files for OpenSSL..."
+          $hdr = Join-Path "${{ matrix.openssl_dir }}" "include\openssl\ssl.h"
+          if (-not (Test-Path $hdr)) {
+            Write-Host "Listing OpenSSL candidates..."
             Get-ChildItem "C:\Program Files*" -Filter "*OpenSSL*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
-            Get-ChildItem "${{ matrix.openssl_dir }}" -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host $_.FullName }
-            Write-Error "OpenSSL headers not found after install"
+            if (Test-Path "${{ matrix.openssl_dir }}") {
+              Get-ChildItem "${{ matrix.openssl_dir }}" -ErrorAction SilentlyContinue | Select-Object -First 30 | ForEach-Object { Write-Host $_.FullName }
+            }
+            Write-Error "OpenSSL headers not found at $hdr"
             exit 1
           }
           "OPENSSL_ROOT_DIR=${{ matrix.openssl_dir }}" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
