@@ -129,6 +129,21 @@ jobs:
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
 
+      - name: Install OpenSSL
+        shell: pwsh
+        run: |
+          choco install openssl -y --no-progress
+          # Help CMake FindOpenSSL on Windows runners
+          if (Test-Path "C:\Program Files\OpenSSL-Win64") {
+            echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
+            echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64"
+          } elseif (Test-Path "C:\Program Files\OpenSSL") {
+            echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL" >> $env:GITHUB_ENV
+            echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL"
+          } else {
+            Get-ChildItem "C:\Program Files" -Filter "*OpenSSL*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+          }
+
       - name: Configure Client
         working-directory: client
         shell: pwsh
