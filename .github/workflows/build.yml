@@ -16,7 +16,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86, x64]
+        include:
+          - arch: x64
+            openssl_url: https://slproweb.com/download/Win64OpenSSL-4_0_2.exe
+            openssl_dir: C:\Program Files\OpenSSL-Win64
+          - arch: x86
+            openssl_url: https://slproweb.com/download/Win32OpenSSL-4_0_2.exe
+            openssl_dir: C:\Program Files (x86)\OpenSSL-Win32
 
     steps:
       - name: Checkout client sources from OpenMU-MuMain
@@ -62,26 +68,24 @@ jobs:
           }
 
           # 2) Walk all upstream source files and restore if local is missing or truncated
-          #    Threshold: local lines < 90% of upstream lines → treat as truncated
           $restored = 0
           $skipped = 0
           $exts = @(".cpp", ".h", ".hpp", ".c", ".cc", ".cxx")
 
           Get-ChildItem -Path $upSource -Recurse -File | ForEach-Object {
-            $rel = $_.FullName.Substring($upSource.Length).TrimStart('\', '/')
+            $rel = $_.FullName.Substring($upSource.Length).TrimStart('\\', '/')
             $dest = Join-Path $localSource $rel
             $ext = $_.Extension.ToLowerInvariant()
             if ($exts -notcontains $ext) { return }
 
             $upLines = (Get-Content $_.FullName | Measure-Object -Line).Lines
-            if ($upLines -lt 5) { return }  # ignore tiny stubs
+            if ($upLines -lt 5) { return }
 
             $need = $false
             if (-not (Test-Path $dest)) {
               $need = $true
             } else {
               $localLines = (Get-Content $dest | Measure-Object -Line).Lines
-              # truncated if significantly shorter than upstream
               if ($localLines -lt [math]::Floor($upLines * 0.9)) {
                 $need = $true
               }
@@ -102,7 +106,7 @@ jobs:
 
           Write-Host "Restored $restored file(s) from upstream; kept $skipped local file(s)"
 
-          # 3) Ensure Dotnet packet headers exist (copy any still missing)
+          # 3) Ensure Dotnet packet headers exist
           $dotnetSrc = Join-Path $upSource "Dotnet"
           $dotnetDst = Join-Path $localSource "Dotnet"
           if (Test-Path $dotnetSrc) {
@@ -129,25 +133,35 @@ jobs:
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
 
-      - name: Install OpenSSL
+      - name: Install OpenSSL (${{ matrix.arch }})
         shell: pwsh
         run: |
-          choco install openssl -y --no-progress
-          # Help CMake FindOpenSSL on Windows runners
-          if (Test-Path "C:\Program Files\OpenSSL-Win64") {
-            echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
-            echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64"
-          } elseif (Test-Path "C:\Program Files\OpenSSL") {
-            echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL" >> $env:GITHUB_ENV
-            echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL"
-          } else {
-            Get-ChildItem "C:\Program Files" -Filter "*OpenSSL*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+          $installer = Join-Path $env:RUNNER_TEMP "openssl-setup.exe"
+          Write-Host "Downloading OpenSSL for ${{ matrix.arch }}..."
+          Invoke-WebRequest -Uri "${{ matrix.openssl_url }}" -OutFile $installer
+          Write-Host "Silent install to ${{ matrix.openssl_dir }}..."
+          $args = "/verysilent /suppressmsgboxes /sp- /DIR=`"${{ matrix.openssl_dir }}`""
+          $p = Start-Process -FilePath $installer -ArgumentList $args -Wait -PassThru
+          Write-Host "Installer exit code: $($p.ExitCode)"
+          if (-not (Test-Path "${{ matrix.openssl_dir }}\include\openssl\ssl.h")) {
+            Write-Host "Listing Program Files for OpenSSL..."
+            Get-ChildItem "C:\Program Files*" -Filter "*OpenSSL*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+            Get-ChildItem "${{ matrix.openssl_dir }}" -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host $_.FullName }
+            Write-Error "OpenSSL headers not found after install"
+            exit 1
           }
+          "OPENSSL_ROOT_DIR=${{ matrix.openssl_dir }}" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "OPENSSL_ROOT_DIR=${{ matrix.openssl_dir }}"
+          "${{ matrix.openssl_dir }}\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: Configure Client
         working-directory: client
         shell: pwsh
-        run: cmake --preset windows-${{ matrix.arch }}
+        env:
+          OPENSSL_ROOT_DIR: ${{ matrix.openssl_dir }}
+        run: |
+          Write-Host "OPENSSL_ROOT_DIR=$env:OPENSSL_ROOT_DIR"
+          cmake --preset windows-${{ matrix.arch }} -DOPENSSL_ROOT_DIR="$env:OPENSSL_ROOT_DIR"
 
       - name: Build Client
         working-directory: client
